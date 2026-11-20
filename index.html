@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>月の位相・秤動・終端部アニメーター</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+<div class="max-w-3xl mx-auto px-4 py-6">
+  <header class="text-center mb-6">
+    <h1 class="text-2xl font-bold text-gray-200 mb-1">🌑 月の位相・秤動アニメーター</h1>
+    <p class="text-gray-600 text-xs">月相・秤動（libration）・終端部（terminator）の動きをリアルタイム表示</p>
+  </header>
+
+  <div class="flex gap-4 mb-4">
+    <div class="flex-1">
+      <canvas id="mainCanvas" width="400" height="400" class="w-full max-w-xs mx-auto rounded-full border border-gray-800 block" aria-label="月の位相表示"></canvas>
+    </div>
+    <div class="flex-1">
+      <canvas id="orbitCanvas" width="300" height="300" class="w-full rounded-xl border border-gray-800 bg-gray-950 block" aria-label="月の軌道図"></canvas>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+    <div class="bg-gray-900 rounded-xl p-3 text-center">
+      <div class="text-xs text-gray-500 mb-1">月齢</div>
+      <div id="lunarAge" class="text-xl font-bold text-yellow-300">0.0</div>
+      <div class="text-xs text-gray-600">日</div>
+    </div>
+    <div class="bg-gray-900 rounded-xl p-3 text-center">
+      <div class="text-xs text-gray-500 mb-1">月相</div>
+      <div id="phaseName" class="text-sm font-bold text-gray-200">新月</div>
+      <div id="phaseEmoji" class="text-xl">🌑</div>
+    </div>
+    <div class="bg-gray-900 rounded-xl p-3 text-center">
+      <div class="text-xs text-gray-500 mb-1">秤動X</div>
+      <div id="libX" class="text-xl font-bold text-blue-300">0.0°</div>
+    </div>
+    <div class="bg-gray-900 rounded-xl p-3 text-center">
+      <div class="text-xs text-gray-500 mb-1">秤動Y</div>
+      <div id="libY" class="text-xl font-bold text-green-300">0.0°</div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+    <div class="bg-gray-900 rounded-xl p-4">
+      <label for="dateInput" class="block text-sm text-gray-400 mb-2">日付から月齢計算</label>
+      <input id="dateInput" type="date" class="w-full bg-gray-800 border border-gray-600 text-gray-100 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-gray-400" aria-label="日付を入力" onchange="setFromDate()">
+      <div id="dateInfo" class="text-xs text-gray-500 mt-1"></div>
+    </div>
+    <div class="bg-gray-900 rounded-xl p-4">
+      <label for="speedSlider" class="block text-sm text-gray-400 mb-2">速度: <span id="valSpeed" class="text-white font-bold">1.0x</span></label>
+      <input id="speedSlider" type="range" min="0" max="50" step="1" value="5" class="w-full accent-gray-400 mb-2" aria-label="アニメーション速度" oninput="document.getElementById('valSpeed').textContent = (parseInt(this.value)/5).toFixed(1)+'x'">
+      <div class="flex gap-2 mt-2">
+        <button onclick="togglePause()" id="pauseBtn" class="flex-1 bg-gray-700 hover:bg-gray-600 text-xs py-1.5 rounded-lg transition" aria-label="一時停止">⏸ 一時停止</button>
+        <button onclick="resetAnim()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-xs py-1.5 rounded-lg transition" aria-label="リセット">↺ リセット</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-gray-900 rounded-xl p-4 mb-4">
+    <label class="flex items-center gap-3 cursor-pointer">
+      <span class="text-sm text-gray-400">秤動エフェクト強調（実際より誇張）</span>
+      <input type="checkbox" id="exaggerateLib" class="w-4 h-4" checked aria-label="秤動エフェクトを強調する">
+    </label>
+  </div>
+
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 text-xs text-gray-500">
+    <div class="font-bold text-gray-300 mb-1">秤動（リブレーション）とは</div>
+    <p>月が地球から見て微小に揺れているように見える現象。月の公転軌道が楕円（経度秤動・±7.9°）・月の自転軸傾き（緯度秤動・±6.7°）・地球の自転（日周秤動）が原因。これにより月表面の59%が地球から観測可能。</p>
+  </div>
+</div>
+
+<script>
+const mainCanvas = document.getElementById('mainCanvas');
+const mCtx = mainCanvas.getContext('2d');
+const orbitCanvas = document.getElementById('orbitCanvas');
+const oCtx = orbitCanvas.getContext('2d');
+
+let lunarPhase = 0; // 0-1 (0=new, 0.5=full)
+let paused = false;
+let animReq = null;
+
+const LUNAR_CYCLE = 29.53; // days
+const PHASES = [
+  { name: '新月', emoji: '🌑', range: [0, 0.03] },
+  { name: '三日月', emoji: '🌒', range: [0.03, 0.22] },
+  { name: '上弦の月', emoji: '🌓', range: [0.22, 0.28] },
+  { name: '十日夜', emoji: '🌔', range: [0.28, 0.47] },
+  { name: '満月', emoji: '🌕', range: [0.47, 0.53] },
+  { name: '十六夜', emoji: '🌖', range: [0.53, 0.72] },
+  { name: '下弦の月', emoji: '🌗', range: [0.72, 0.78] },
+  { name: '有明月', emoji: '🌘', range: [0.78, 0.97] },
+  { name: '新月（次）', emoji: '🌑', range: [0.97, 1.0] },
+];
+
+function getPhaseInfo(p) {
+  for (const phase of PHASES) {
+    if (p >= phase.range[0] && p < phase.range[1]) return phase;
+  }
+  return PHASES[0];
+}
+
+function setFromDate() {
+  const dateStr = document.getElementById('dateInput').value;
+  if (!dateStr) return;
+  const date = new Date(dateStr);
+  // Known new moon: 2000-01-06
+  const ref = new Date('2000-01-06');
+  const diff = (date - ref) / (1000 * 60 * 60 * 24);
+  const age = ((diff % LUNAR_CYCLE) + LUNAR_CYCLE) % LUNAR_CYCLE;
+  lunarPhase = age / LUNAR_CYCLE;
+  document.getElementById('dateInfo').textContent = '月齢: ' + age.toFixed(1) + '日';
+}
+
+function resetAnim() {
+  lunarPhase = 0;
+}
+
+function togglePause() {
+  paused = !paused;
+  document.getElementById('pauseBtn').textContent = paused ? '▶ 再開' : '⏸ 一時停止';
+}
+
+function drawMoon(phase, libX, libY) {
+  const W = mainCanvas.width;
+  const H = mainCanvas.height;
+  const cx = W / 2;
+  const cy = H / 2;
+  const r = 160;
+
+  mCtx.fillStyle = '#000000';
+  mCtx.fillRect(0, 0, W, H);
+
+  // Stars background
+  mCtx.fillStyle = 'rgba(255,255,255,0.3)';
+  for (let i = 0; i < 50; i++) {
+    const sx = ((i * 157 + 13) % W);
+    const sy = ((i * 83 + 7) % H);
+    if (Math.sqrt((sx - cx)**2 + (sy - cy)**2) > r + 20) {
+      mCtx.fillRect(sx, sy, 1, 1);
+    }
+  }
+
+  // Moon surface (always visible circle)
+  // Phase: 0=new, 0.25=first quarter, 0.5=full, 0.75=last quarter
+  const angle = phase * Math.PI * 2;
+
+  mCtx.save();
+  mCtx.translate(cx + libX * 2, cy + libY * 2);
+
+  // Dark side
+  mCtx.beginPath();
+  mCtx.arc(0, 0, r, 0, Math.PI * 2);
+  mCtx.fillStyle = '#1a1a2e';
+  mCtx.fill();
+
+  // Moon surface texture (craters)
+  mCtx.fillStyle = '#2d2d4e';
+  const craters = [
+    {x: -50, y: -30, r: 15}, {x: 30, y: 60, r: 20}, {x: -20, y: 80, r: 12},
+    {x: 70, y: -50, r: 10}, {x: -80, y: 50, r: 18}, {x: 40, y: -90, r: 8},
+    {x: -60, y: -80, r: 14}, {x: 90, y: 30, r: 11},
+  ];
+  craters.forEach(c => {
+    mCtx.beginPath(); mCtx.arc(c.x, c.y, c.r, 0, Math.PI * 2); mCtx.fill();
+  });
+
+  // Illuminated part based on phase
+  // phase 0=new (all dark), 0.5=full (all light)
+  mCtx.save();
+  mCtx.beginPath();
+  mCtx.arc(0, 0, r, 0, Math.PI * 2);
+  mCtx.clip();
+
+  const illum = Math.cos(angle); // -1 to 1; -1=new, 0=quarter, 1=full
+
+  if (phase < 0.5) {
+    // Waxing: right side illuminated
+    const xOff = illum * r;
+    mCtx.beginPath();
+    mCtx.arc(0, 0, r, -Math.PI/2, Math.PI/2, false);
+    if (phase < 0.25) {
+      // New to first quarter: ellipse on right
+      mCtx.bezierCurveTo(xOff, r, xOff, -r, 0, -r);
+    } else {
+      // First quarter to full
+      mCtx.bezierCurveTo(xOff, r, xOff, -r, 0, -r);
+    }
+    const moonGrad = mCtx.createRadialGradient(-30, -30, 10, 0, 0, r);
+    moonGrad.addColorStop(0, '#f5f5e8');
+    moonGrad.addColorStop(0.5, '#d4d4aa');
+    moonGrad.addColorStop(1, '#a0a080');
+    mCtx.fillStyle = moonGrad;
+    mCtx.fill();
+  } else {
+    // Waning: left side illuminated
+    const xOff = -illum * r;
+    mCtx.beginPath();
+    mCtx.arc(0, 0, r, Math.PI/2, -Math.PI/2, false);
+    mCtx.bezierCurveTo(xOff, -r, xOff, r, 0, r);
+    const moonGrad = mCtx.createRadialGradient(-30, -30, 10, 0, 0, r);
+    moonGrad.addColorStop(0, '#f5f5e8');
+    moonGrad.addColorStop(0.5, '#d4d4aa');
+    moonGrad.addColorStop(1, '#a0a080');
+    mCtx.fillStyle = moonGrad;
+    mCtx.fill();
+  }
+
+  mCtx.restore();
+
+  // Terminator highlight line
+  const termX = illum * r;
+  mCtx.strokeStyle = 'rgba(255,255,220,0.5)';
+  mCtx.lineWidth = 2;
+  mCtx.beginPath();
+  mCtx.ellipse(termX, 0, Math.abs(termX) * 0.1 + 1, r, 0, 0, Math.PI * 2);
+  mCtx.stroke();
+
+  mCtx.restore();
+
+  // Libration markers
+  if (Math.abs(libX) > 1 || Math.abs(libY) > 1) {
+    mCtx.fillStyle = 'rgba(100,200,255,0.4)';
+    mCtx.font = '10px monospace';
+    mCtx.textAlign = 'center';
+    mCtx.fillText('秤動 X:' + libX.toFixed(1) + '° Y:' + libY.toFixed(1) + '°', cx, cy + r + 20);
+  }
+}
+
+function drawOrbit(phase) {
+  const W = orbitCanvas.width;
+  const H = orbitCanvas.height;
+  const cx = W / 2;
+  const cy = H / 2;
+  const r = 90;
+
+  oCtx.fillStyle = '#000510';
+  oCtx.fillRect(0, 0, W, H);
+
+  // Earth
+  oCtx.beginPath();
+  oCtx.arc(cx, cy, 15, 0, Math.PI * 2);
+  oCtx.fillStyle = '#3b82f6';
+  oCtx.fill();
+
+  // Orbit
+  oCtx.strokeStyle = 'rgba(99,102,241,0.3)';
+  oCtx.lineWidth = 1;
+  oCtx.beginPath();
+  oCtx.arc(cx, cy, r, 0, Math.PI * 2);
+  oCtx.stroke();
+
+  // Moon position
+  const moonAngle = phase * Math.PI * 2 - Math.PI / 2;
+  const mx = cx + r * Math.cos(moonAngle);
+  const my = cy + r * Math.sin(moonAngle);
+
+  // Sun direction indicator
+  const sunX = cx - r * 1.5;
+  oCtx.fillStyle = '#fbbf24';
+  oCtx.font = '14px sans-serif';
+  oCtx.textAlign = 'center';
+  oCtx.fillText('☀', sunX + 5, cy + 5);
+  oCtx.strokeStyle = 'rgba(251,191,36,0.3)';
+  oCtx.lineWidth = 1;
+  oCtx.setLineDash([3, 3]);
+  oCtx.beginPath(); oCtx.moveTo(cx - 15, cy); oCtx.lineTo(sunX + 15, cy); oCtx.stroke();
+  oCtx.setLineDash([]);
+
+  // Moon
+  oCtx.beginPath();
+  oCtx.arc(mx, my, 8, 0, Math.PI * 2);
+  oCtx.fillStyle = '#d1d5db';
+  oCtx.fill();
+
+  // Phase indicator
+  oCtx.fillStyle = 'rgba(255,255,255,0.5)';
+  oCtx.font = '10px sans-serif';
+  oCtx.textAlign = 'center';
+  oCtx.fillText('月', mx, my - 14);
+  oCtx.fillText('地球', cx, cy + 25);
+}
+
+function loop() {
+  if (!paused) {
+    const speed = parseInt(document.getElementById('speedSlider').value) / 5;
+    lunarPhase = (lunarPhase + speed * 0.0002) % 1;
+  }
+
+  const exaggerate = document.getElementById('exaggerateLib').checked;
+  const libScale = exaggerate ? 7 : 1;
+
+  // Libration calculation
+  const libX = Math.sin(lunarPhase * Math.PI * 2) * 7.9 * libScale / 7; // longitude libration
+  const libY = Math.cos(lunarPhase * Math.PI * 2 * 13.37 / 29.53) * 6.7 * libScale / 7; // latitude libration
+
+  const age = lunarPhase * LUNAR_CYCLE;
+  document.getElementById('lunarAge').textContent = age.toFixed(1);
+
+  const info = getPhaseInfo(lunarPhase);
+  document.getElementById('phaseName').textContent = info.name;
+  document.getElementById('phaseEmoji').textContent = info.emoji;
+  document.getElementById('libX').textContent = libX.toFixed(1) + '°';
+  document.getElementById('libY').textContent = libY.toFixed(1) + '°';
+
+  drawMoon(lunarPhase, libX, libY);
+  drawOrbit(lunarPhase);
+
+  animReq = requestAnimationFrame(loop);
+}
+
+window.onload = () => {
+  // Set today's date
+  const today = new Date();
+  document.getElementById('dateInput').valueAsDate = today;
+  setFromDate();
+  loop();
+};
+</script>
+</body>
+</html>
